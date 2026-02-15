@@ -1,0 +1,68 @@
+name: Build BRB1 GKI Kernel
+
+on:
+  push:
+    branches: [ main ]
+  workflow_dispatch:  # 允许手动触发
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          submodules: 'recursive'
+          fetch-depth: 1
+
+      - name: Install dependencies
+        run: |
+          sudo apt update
+          sudo apt install -y \
+            build-essential git python3 python3-pip \
+            libssl-dev bc flex bison libelf-dev \
+            crossbuild-essential-arm64 zip unzip wget curl
+          # 安装 repo 工具
+          mkdir -p ~/bin
+          curl https://storage.googleapis.com/git-repo-downloads/repo > ~/bin/repo
+          chmod a+x ~/bin/repo
+          echo 'PATH=~/bin:$PATH' >> $GITHUB_ENV
+
+      - name: Download Android NDK
+        run: |
+          wget https://dl.google.com/android/repository/android-ndk-r26b-linux.zip
+          unzip -q android-ndk-r26b-linux.zip
+          echo "NDK=$PWD/android-ndk-r26b" >> $GITHUB_ENV
+          echo "$PWD/android-ndk-r26b/toolchains/llvm/prebuilt/linux-x86_64/bin" >> $GITHUB_PATH
+
+      - name: Initialize and sync kernel source
+        run: |
+          mkdir -p android-kernel && cd android-kernel
+          repo init -u https://android.googlesource.com/kernel/manifest -b common-android16-6.6
+          repo sync -c -j$(nproc) --no-clone-bundle --no-tags
+          # 拉取你的设备补丁（替换为你 fork 的仓库地址）
+          git clone https://github.com/${{ github.repository_owner }}/android_kernel_oneplus_sm8550.git -b android16-6.6 device/oneplus/BRB1
+
+      - name: Build kernel
+        run: |
+          cd android-kernel/common
+          # 应用设备补丁
+          git am ../device/oneplus/BRB1/patches/*.patch || true
+          # 配置并编译
+          make ARCH=arm64 CROSS_COMPILE=aarch64-linux-gnu- gki_defconfig
+          tools/bazel run //common:kernel_aarch64_dist -- --destdir=out/BRB1-dist
+
+      - name: Package AnyKernel3
+        run: |
+          cd android-kernel
+          git clone https://github.com/osm0sis/AnyKernel3.git
+          cd AnyKernel3
+          cp ../common/out/BRB1-dist/Image.gz-dtb zImage
+          cp ../common/out/BRB1-dist/dtbo.img dtbo.img
+          zip -r9 BRB1-GKI-Kernel.zip * -x .git README.md *placeholder
+
+      - name: Upload kernel
+        uses: actions/upload-artifact@v4
+        with:
+          name: BRB1-GKI-Kernel
+          path: android-kernel/AnyKernel3/BRB1-GKI-Kernel.zip
